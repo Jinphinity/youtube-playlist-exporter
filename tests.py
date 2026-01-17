@@ -90,6 +90,17 @@ class PlaylistTranscriptsFormattingTests(unittest.TestCase):
         )
         self.assertIn("- [00:00]–[00:12] Hello world More content", rendered)
 
+    def test_render_video_markdown_with_date(self):
+        entry = {
+            "title": "My Video",
+            "upload_date": "20230101",
+            "transcript": [{"start": 0, "text": "Hi"}],
+        }
+        rendered = pt.render_video_markdown(entry, include_timestamps=False)
+        self.assertIn("# My Video (20230101)", rendered)
+        self.assertIn("Hi", rendered)
+        self.assertNotIn("<details>", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

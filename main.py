@@ -149,6 +149,44 @@ def parse_existing_markdown(path: Path) -> Tuple[Optional[str], List[Dict[str, A
     return playlist_title, entries
 
 
+def sanitize_filename(name: str) -> str:
+    """Sanitize a string to be safe for filenames."""
+    import re
+    return re.sub(r'[<>:"/\\|?*]', '_', name).strip()
+
+
+def render_video_markdown(
+    entry: Dict[str, Any],
+    include_timestamps: bool,
+    style: str = "paragraph",
+    chunk_kwargs: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Render a single video transcript as a standalone markdown file."""
+    title = entry.get("title", "Untitled")
+    upload_date = entry.get("upload_date")
+    date_str = f" ({upload_date})" if upload_date else ""
+    
+    lines = [f"# {title}{date_str}", ""]
+    
+    transcript = entry.get("transcript")
+    if transcript:
+        for chunk in chunk_transcript(transcript, **(chunk_kwargs or {})):
+            prefix = f"{format_timestamp(chunk['start'])} " if include_timestamps else ""
+            if include_timestamps and chunk.get("end") is not None:
+                prefix = f"{format_timestamp(chunk['start'])}–{format_timestamp(chunk['end'])} "
+            
+            if style == "bullet":
+                lines.append(f"- {prefix}{chunk['text']}".strip())
+            else:
+                lines.append(f"{prefix}{chunk['text']}".strip())
+                lines.append("")
+    else:
+        lines.append("_no transcript available_")
+        lines.append("")
+        
+    return "\n".join(lines)
+
+
 def build_collapsible_section(
     title: str,
     transcript: Optional[List[Dict[str, Any]]],
@@ -224,6 +262,7 @@ def fetch_playlist_videos(playlist_url: str) -> Tuple[Optional[str], List[Dict[s
                 "index": idx,
                 "id": entry["id"],
                 "title": entry.get("title", f"Video {idx}"),
+                "upload_date": entry.get("upload_date"),
             }
         )
     return playlist_title, videos
@@ -285,27 +324,95 @@ def main() -> None:
         default=["en"],
         help="Language codes to request transcripts in order of preference (default: en)",
     )
+    parser.add_argument(
+        "--sort-by-date",
+        action="store_true",
+        help="Sort videos by upload date (oldest first).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        help="Output directory for individual video files. If set, --out is ignored for the file path.",
+    )
     args = parser.parse_args()
 
     if args.from_markdown:
         playlist_title, entries = parse_existing_markdown(Path(args.from_markdown))
     else:
         playlist_title, videos = fetch_playlist_videos(args.playlist_url)
+        
+        # If sorting by date is requested, ensure we have upload dates.
+        # extraction_flat=True often skips dates. If missing, we must fetch details.
+        if args.sort_by_date and videos and not videos[0].get("upload_date"):
+            if YoutubeDL:
+                print("Fetching video metadata to get upload dates...")
+                ydl_opts = {"quiet": True, "skip_download": True}
+                with YoutubeDL(ydl_opts) as ydl:
+                    for video in videos:
+                        try:
+                            info = ydl.extract_info(video["id"], download=False)
+                            video["upload_date"] = info.get("upload_date")
+                        except Exception as e:
+                            print(f"Could not fetch metadata for {video['id']}: {e}")
+
         entries = []
         for video in videos:
             transcript = fetch_video_transcript(video_id=video["id"], languages=args.languages)
             entries.append({**video, "transcript": transcript})
 
-    content = render_consolidated(
-        entries,
-        include_timestamps=args.timestamps,
-        playlist_title=playlist_title,
-        style=args.style,
-        chunk_kwargs={"max_gap_seconds": args.max_gap_seconds, "max_chars": args.max_chars},
-    )
-    output_path = Path(args.out)
-    write_markdown(output_path, content)
-    print(f"Wrote {output_path} with {len(entries)} videos.")
+    # Sort if requested
+    if args.sort_by_date:
+        # Sort by upload_date (strings like '20210101' sort correctly). 
+        # Handle missing dates by putting them at the end or beginning? 
+        # Let's put them at the end.
+        entries.sort(key=lambda x: x.get("upload_date") or "99999999")
+
+    chunk_kwargs = {"max_gap_seconds": args.max_gap_seconds, "max_chars": args.max_chars}
+
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        for entry in entries:
+            date_prefix = entry.get("upload_date", "")
+            if not date_prefix:
+                # Fallback to index if no date, or just leave it. 
+                # User wants chronological ordering.
+                # If we sorted, the order is correct, but filenames need to reflect it 
+                # so they sort in file explorer.
+                # If sort_by_date is on, we might use an index prefix based on the new sort order?
+                # Or just use the date.
+                pass
+            
+            # Construct filename: "YYYYMMDD - Title.md" or "01 - Title.md"
+            # If we have a date, use it.
+            title = sanitize_filename(entry.get("title", "video"))
+            if date_prefix:
+                filename = f"{date_prefix} - {title}.md"
+            else:
+                # If no date, maybe use index?
+                idx = entry.get("index", 0)
+                filename = f"{idx:02d} - {title}.md"
+            
+            content = render_video_markdown(
+                entry, 
+                include_timestamps=args.timestamps, 
+                style=args.style,
+                chunk_kwargs=chunk_kwargs
+            )
+            write_markdown(out_dir / filename, content)
+        print(f"Wrote {len(entries)} files to {out_dir}")
+
+    else:
+        content = render_consolidated(
+            entries,
+            include_timestamps=args.timestamps,
+            playlist_title=playlist_title,
+            style=args.style,
+            chunk_kwargs=chunk_kwargs,
+        )
+        output_path = Path(args.out)
+        write_markdown(output_path, content)
+        print(f"Wrote {output_path} with {len(entries)} videos.")
 
 
 if __name__ == "__main__":  # pragma: no cover
